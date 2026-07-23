@@ -181,18 +181,18 @@ function buildDoll() {
 
   const uAL = limb(s.x - 0.35, s.y + 1.9, 0.24, 0.10, 0.5, '#5f8be0', 'arm');
   const lAL = limb(s.x - 0.35, s.y + 1.35, 0.24, 0.09, 0.5, '#5f8be0', 'forearm');
-  pin(torso, -0.30, 0.55, uAL, 0, 0.30, 7, 2);
+  const shoulderL = pin(torso, -0.30, 0.55, uAL, 0, 0.30, 7, 2);
   pin(uAL, 0, -0.30, lAL, 0, 0.30, 5, 1.5);
 
   const uAR = limb(s.x + 0.35, s.y + 1.9, 0.24, 0.10, 0.5, '#5f8be0', 'arm');
   const lAR = limb(s.x + 0.35, s.y + 1.35, 0.24, 0.09, 0.5, '#5f8be0', 'forearm');
-  pin(torso, 0.30, 0.55, uAR, 0, 0.30, 7, 2);
+  const shoulderR = pin(torso, 0.30, 0.55, uAR, 0, 0.30, 7, 2);
   pin(uAR, 0, -0.30, lAR, 0, 0.30, 5, 1.5);
 
   const legL = limb(s.x - 0.14, s.y + 0.55, 0.42, 0.12, 0.95, '#3f4a86', 'leg');
   const legR = limb(s.x + 0.14, s.y + 0.55, 0.42, 0.12, 0.95, '#3f4a86', 'leg');
-  pin(torso, -0.14, -0.66, legL, 0, 0.50, 18, 5);
-  pin(torso, 0.14, -0.66, legR, 0, 0.50, 18, 5);
+  const hipL = pin(torso, -0.14, -0.66, legL, 0, 0.50, 18, 5);
+  const hipR = pin(torso, 0.14, -0.66, legR, 0, 0.50, 18, 5);
 
   doll = {
     torso, head,
@@ -204,6 +204,9 @@ function buildDoll() {
       { leg: legL, localEnd: { x: 0, y: -0.55 } },
       { leg: legR, localEnd: { x: 0, y: -0.55 } },
     ],
+    // sign = phase offset so the two legs (and arms) alternate
+    legJoints: [{ joint: hipL, sign: 1 }, { joint: hipR, sign: -1 }],
+    armJoints: [{ joint: shoulderL, sign: -1 }, { joint: shoulderR, sign: 1 }],
     walkPhase: 0,
   };
 }
@@ -287,26 +290,44 @@ function controlDoll(dt) {
   const grabbing = isGrabbing();
   const grounded = footGrounded();
 
-  // Uprighting PD on the torso (relaxed while hanging so you can swing)
+  const vx = t.linvel().x;
+  const WALK = 3.6;   // target walking speed (m/s)
+
+  // --- Keep the torso upright. Strong PD + spin damping = no tumbling/rolling.
+  //     Relaxed to almost nothing while hanging so a grabbed body can swing freely.
   let ang = t.rotation();
   while (ang >  Math.PI) ang -= 2 * Math.PI;
   while (ang < -Math.PI) ang += 2 * Math.PI;
-  const upFactor = grabbing ? 0.12 : (grounded ? 1.0 : 0.5);
-  t.addTorque((-38 * ang - 9 * t.angvel()) * upFactor, true);
+  const up = grabbing ? 0.08 : 1.0;
+  t.addTorque((-95 * ang - 22 * t.angvel()) * up, true);
 
-  // Horizontal drive (walk on ground, pump while swinging)
-  if (dir !== 0) {
-    const vx = t.linvel().x;
-    const maxV = grabbing ? 99 : 5.5;
-    if (dir * vx < maxV) t.addForce({ x: dir * (grounded ? 95 : 42), y: 0 }, true);
-    // little stepping motion for readability
-    doll.walkPhase += dt * 10 * dir;
+  // --- Horizontal motion as a *velocity servo*, not raw force. The drive fades
+  //     to zero as speed approaches the target, so it can never spin the doll up.
+  if (!grabbing) {
+    if (dir !== 0) {
+      t.addForce({ x: (dir * WALK - vx) * 16, y: 0 }, true);
+    } else if (grounded) {
+      t.addForce({ x: -vx * 10, y: 0 }, true);   // planted stop, no sliding
+    }
+  } else if (dir !== 0) {
+    t.addForce({ x: dir * 26, y: 0 }, true);       // pump the swing
+  }
+
+  // --- Stepping gait: alternating hip motors give real propulsion + readability.
+  const walking = dir !== 0 && grounded && !grabbing;
+  doll.walkPhase = walking ? doll.walkPhase + dt * 9 : doll.walkPhase * 0.85;
+  const stride = walking ? 0.55 : 0.0;
+  for (const l of doll.legJoints) {
+    l.joint.configureMotorPosition(Math.sin(doll.walkPhase) * stride * l.sign, 22, 4);
+  }
+  for (const a of doll.armJoints) {   // arms counter-swing for life
+    const tgt = grabbing ? 0 : Math.sin(doll.walkPhase) * 0.5 * a.sign;
+    a.joint.configureMotorPosition(tgt, 7, 2);
   }
 
   // Jump
   if ((pressed.has('w') || pressed.has('arrowup') || pressed.has(' ')) && grounded && !grabbing) {
-    t.applyImpulse({ x: dir * 1.2, y: 11 }, true);
-    doll.feet.forEach(f => f.leg.body.applyImpulse({ x: 0, y: 1.5 }, true));
+    t.applyImpulse({ x: dir * 1.0, y: 10 }, true);
   }
 
   // Grab (hold J or left mouse) — both hands reach
