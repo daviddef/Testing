@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Ragdoll Rigger — prototype</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b1020; overflow: hidden;
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  #game { display: block; width: 100vw; height: 100vh; touch-action: none; cursor: crosshair; }
+
+  /* HUD */
+  .hud { position: fixed; pointer-events: none; color: #e8ecff; text-shadow: 0 1px 2px #000a; }
+  #topbar { top: 0; left: 0; right: 0; padding: 12px 16px; display: flex; gap: 14px;
+    align-items: center; font-size: 14px; background: linear-gradient(#0b1020cc, #0b102000); }
+  #topbar .pill { pointer-events: none; background: #1b2445cc; border: 1px solid #33407a;
+    border-radius: 999px; padding: 5px 12px; }
+  #mode.build { background: #3a2a12cc; border-color: #a56a2a; color: #ffcf8f; }
+  #mode.play  { background: #123a2acc; border-color: #2aa56a; color: #8fffcf; }
+  #hint { margin-left: auto; opacity: .85; }
+
+  #help { left: 16px; bottom: 14px; font-size: 12.5px; line-height: 1.55; max-width: 340px;
+    background: #10173096; border: 1px solid #2a356a; border-radius: 12px; padding: 12px 14px;
+    backdrop-filter: blur(6px); }
+  #help b { color: #ffd9a0; }
+  #help kbd { display: inline-block; min-width: 18px; text-align: center; padding: 1px 6px;
+    margin: 0 1px; border-radius: 6px; background: #232c55; border: 1px solid #3c488a;
+    box-shadow: 0 1px 0 #0006; font-family: ui-monospace, monospace; font-size: 11.5px; }
+
+  /* Centered overlays */
+  #overlay { position: fixed; inset: 0; display: grid; place-items: center; text-align: center;
+    background: #070b18d8; color: #eef2ff; padding: 24px; }
+  #overlay.hidden { display: none; }
+  #overlay h1 { margin: 0 0 6px; font-size: clamp(26px, 5vw, 44px); letter-spacing: .5px; }
+  #overlay p { margin: 4px 0; opacity: .9; max-width: 560px; }
+  #overlay .go { pointer-events: auto; margin-top: 18px; padding: 12px 22px; font-size: 16px;
+    border: 0; border-radius: 12px; cursor: pointer; color: #08131a; font-weight: 700;
+    background: linear-gradient(#8fe3b6, #43c98a); box-shadow: 0 6px 20px #22cf7a44; }
+  #overlay .err { color: #ffb3b3; font-family: ui-monospace, monospace; font-size: 13px;
+    background: #2a1220; border: 1px solid #6a2a3a; border-radius: 10px; padding: 12px 14px; margin-top: 14px; }
+  .win h1 { color: #9fffce; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="topbar" class="hud">
+  <span class="pill" id="mode">—</span>
+  <span class="pill">Ropes placed: <b id="ropeCount">0</b></span>
+  <span class="pill" id="status">Cross the canyon →</span>
+  <span id="hint">Prototype • physics: Rapier2D</span>
+</div>
+
+<div id="help" class="hud">
+  <div><b>Move</b> <kbd>A</kbd><kbd>D</kbd> / <kbd>←</kbd><kbd>→</kbd> &nbsp; <b>Jump</b> <kbd>W</kbd>/<kbd>Space</kbd></div>
+  <div><b>Grab rope/ledge</b> hold <kbd>J</kbd> or <kbd>Left-click</kbd> (both hands)</div>
+  <div><b>Build mode</b> <kbd>B</kbd> — then click the overhang to hang a rope</div>
+  <div><b>Reset doll</b> <kbd>R</kbd> &nbsp; <b>Undo rope</b> <kbd>Bksp</kbd></div>
+  <div style="margin-top:6px;opacity:.8">Swing tip: grab a rope, then tap <kbd>A</kbd>/<kbd>D</kbd> to pump.</div>
+</div>
+
+<div id="overlay">
+  <h1>Ragdoll Rigger</h1>
+  <p>Move a floppy 3D-style ragdoll across a 2D world. There's a canyon in your way.</p>
+  <p><b>Build</b> a swing-rope over the gap, then <b>swing</b> the doll across to the flag.</p>
+  <button class="go" id="startBtn">Loading physics…</button>
+  <div class="err" id="errBox" style="display:none"></div>
+</div>
+
+<script type="module">
+import RAPIER from 'https://esm.sh/@dimforge/rapier2d-compat@0.14.0';
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const ui = {
+  mode: document.getElementById('mode'),
+  ropeCount: document.getElementById('ropeCount'),
+  status: document.getElementById('status'),
+  overlay: document.getElementById('overlay'),
+  startBtn: document.getElementById('startBtn'),
+  errBox: document.getElementById('errBox'),
+};
+
+// ---- Collision groups (membership<<16 | filter) -------------------------------
+const G_GROUND = 0x0001, G_DOLL = 0x0002, G_ROPE = 0x0004;
+const CG = (mem, filt) => (mem << 16) | filt;
+const CG_GROUND = CG(G_GROUND, G_DOLL | G_ROPE);
+const CG_DOLL   = CG(G_DOLL,   G_GROUND | G_ROPE);   // no self-collision
+const CG_ROPE   = CG(G_ROPE,   G_GROUND | G_DOLL);   // no rope-rope
+
+// ---- World geometry (metres, y-up) --------------------------------------------
+const LEVEL = {
+  leftPlat:  { x0: -12, x1: 0,  top: 0 },
+  rightPlat: { x0: 8,   x1: 24, top: 0 },
+  overhang:  { x0: 0.5, x1: 7.5, y: 6.2 },   // beam you anchor ropes to
+  start:     { x: -6, y: 0.2 },
+  goalX:     20,
+  deathY:    -9,
+};
+
+const PX = 40;                 // pixels per metre at base zoom
+const GRAB_RANGE = 0.6;        // metres a hand can reach to grab
+
+let RAPIER_READY = false;
+let world, parts = [], grabbables = [], ropes = [], doll = null;
+let removed = new Set();       // rigid-body handles that were destroyed
+const cam = { x: LEVEL.start.x, y: 1.6, scale: PX };
+let mode = 'play';             // 'play' | 'build'
+let won = false, started = false;
+
+const keys = new Set();
+let pointer = { x: 0, y: 0, down: false, worldX: 0, worldY: 0 };
+const pressed = new Set();     // edge-triggered keys this frame
+
+// ---- Helpers ------------------------------------------------------------------
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+function rot(x, y, a) { const c = Math.cos(a), s = Math.sin(a); return { x: x*c - y*s, y: x*s + y*c }; }
+function localOf(body, wx, wy) { // world point -> body local frame
+  const t = body.translation(), a = body.rotation();
+  const dx = wx - t.x, dy = wy - t.y, c = Math.cos(a), s = Math.sin(a);
+  return { x: dx*c + dy*s, y: -dx*s + dy*c };
+}
+function worldPoint(body, lx, ly) {
+  const t = body.translation(), r = rot(lx, ly, body.rotation());
+  return { x: t.x + r.x, y: t.y + r.y };
+}
+
+// ---- Level --------------------------------------------------------------------
+function makeGround(x0, x1, top, thickness = 4) {
+  const cx = (x0 + x1) / 2, cy = top - thickness / 2;
+  const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(cx, cy));
+  const col = RAPIER.ColliderDesc.cuboid((x1 - x0) / 2, thickness / 2).setFriction(1.0);
+  world.createCollider(col, body).setCollisionGroups(CG_GROUND);
+  return { body, x0, x1, top };
+}
+function makeLedgeKnob(x, y) {
+  const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(x, y));
+  world.createCollider(RAPIER.ColliderDesc.cuboid(0.05, 0.05).setSensor(true), body)
+       .setCollisionGroups(CG(G_GROUND, 0)); // no physical collision, just a grab anchor
+  grabbables.push({ body, kind: 'ledge' });
+}
+
+function buildLevel() {
+  makeGround(LEVEL.leftPlat.x0, LEVEL.leftPlat.x1, LEVEL.leftPlat.top);
+  makeGround(LEVEL.rightPlat.x0, LEVEL.rightPlat.x1, LEVEL.rightPlat.top);
+  // Overhang beam (visual + anchor surface)
+  const o = LEVEL.overhang, cx = (o.x0 + o.x1) / 2;
+  const beam = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(cx, o.y + 0.25));
+  world.createCollider(RAPIER.ColliderDesc.cuboid((o.x1 - o.x0)/2 + 0.4, 0.25), beam)
+       .setCollisionGroups(CG_GROUND);
+  // Grabbable ledges at the two canyon edges (so you can climb out)
+  makeLedgeKnob(LEVEL.leftPlat.x1 - 0.15, LEVEL.leftPlat.top + 0.2);
+  makeLedgeKnob(LEVEL.rightPlat.x0 + 0.15, LEVEL.rightPlat.top + 0.2);
+}
+
+// ---- Ragdoll ------------------------------------------------------------------
+function limb(cx, cy, half, radius, density, color, kind) {
+  const body = world.createRigidBody(
+    RAPIER.RigidBodyDesc.dynamic().setTranslation(cx, cy)
+      .setLinearDamping(0.2).setAngularDamping(1.2));
+  const col = RAPIER.ColliderDesc.capsule(half, radius).setDensity(density).setFriction(0.9);
+  world.createCollider(col, body).setCollisionGroups(CG_DOLL);
+  const part = { body, half, radius, color, kind, home: { x: cx, y: cy } };
+  parts.push(part);
+  return part;
+}
+function pin(a, aLx, aLy, b, bLx, bLy, stiffness, damping) {
+  const jd = RAPIER.JointData.revolute({ x: aLx, y: aLy }, { x: bLx, y: bLy });
+  const j = world.createImpulseJoint(jd, a.body, b.body, true);
+  if (stiffness) j.configureMotorPosition(0.0, stiffness, damping); // springy "muscle tone"
+  return j;
+}
+
+function buildDoll() {
+  const s = LEVEL.start;
+  const torso = limb(s.x, s.y + 1.55, 0.42, 0.30, 1.2, '#6ea0ff', 'torso');
+  const head  = limb(s.x, s.y + 2.45, 0.14, 0.30, 0.8, '#ffd9b0', 'head');
+  pin(torso, 0, 0.72, head, 0, -0.32, 26, 6);
+
+  const uAL = limb(s.x - 0.35, s.y + 1.9, 0.24, 0.10, 0.5, '#5f8be0', 'arm');
+  const lAL = limb(s.x - 0.35, s.y + 1.35, 0.24, 0.09, 0.5, '#5f8be0', 'forearm');
+  pin(torso, -0.30, 0.55, uAL, 0, 0.30, 7, 2);
+  pin(uAL, 0, -0.30, lAL, 0, 0.30, 5, 1.5);
+
+  const uAR = limb(s.x + 0.35, s.y + 1.9, 0.24, 0.10, 0.5, '#5f8be0', 'arm');
+  const lAR = limb(s.x + 0.35, s.y + 1.35, 0.24, 0.09, 0.5, '#5f8be0', 'forearm');
+  pin(torso, 0.30, 0.55, uAR, 0, 0.30, 7, 2);
+  pin(uAR, 0, -0.30, lAR, 0, 0.30, 5, 1.5);
+
+  const legL = limb(s.x - 0.14, s.y + 0.55, 0.42, 0.12, 0.95, '#3f4a86', 'leg');
+  const legR = limb(s.x + 0.14, s.y + 0.55, 0.42, 0.12, 0.95, '#3f4a86', 'leg');
+  pin(torso, -0.14, -0.66, legL, 0, 0.50, 18, 5);
+  pin(torso, 0.14, -0.66, legR, 0, 0.50, 18, 5);
+
+  doll = {
+    torso, head,
+    hands: [
+      { arm: lAL, localEnd: { x: 0, y: -0.32 }, joint: null }, // left hand
+      { arm: lAR, localEnd: { x: 0, y: -0.32 }, joint: null }, // right hand
+    ],
+    feet: [
+      { leg: legL, localEnd: { x: 0, y: -0.55 } },
+      { leg: legR, localEnd: { x: 0, y: -0.55 } },
+    ],
+    walkPhase: 0,
+  };
+}
+
+// ---- Ropes (build mode) -------------------------------------------------------
+function placeRope(anchorX) {
+  const o = LEVEL.overhang;
+  anchorX = clamp(anchorX, o.x0, o.x1);
+  const anchorY = o.y;                       // hang from underside of beam
+  const anchor = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(anchorX, anchorY));
+
+  const N = 9, segLen = 0.5, r = 0.075;
+  const rope = { anchor, segs: [] };
+  let prev = anchor, prevAnchorY = 0;
+  for (let i = 0; i < N; i++) {
+    const cy = anchorY - segLen * (i + 0.5);
+    const b = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(anchorX, cy).setLinearDamping(0.4).setAngularDamping(0.6));
+    const col = RAPIER.ColliderDesc.capsule(segLen/2 - r, r).setDensity(0.4).setFriction(0.6);
+    world.createCollider(col, b).setCollisionGroups(CG_ROPE);
+    const jd = RAPIER.JointData.revolute({ x: 0, y: prevAnchorY }, { x: 0, y: segLen/2 });
+    world.createImpulseJoint(jd, prev, b, true);
+    grabbables.push({ body: b, kind: 'rope' });
+    rope.segs.push({ body: b, half: segLen/2 - r, radius: r });
+    prev = b; prevAnchorY = -segLen/2;
+  }
+  ropes.push(rope);
+  ui.ropeCount.textContent = ropes.length;
+}
+
+function undoRope() {
+  const rope = ropes.pop();
+  if (!rope) return;
+  releaseAllGrabs();
+  const handles = new Set();
+  handles.add(rope.anchor.handle);
+  rope.segs.forEach(s => handles.add(s.body.handle));
+  world.removeRigidBody(rope.anchor);
+  rope.segs.forEach(s => world.removeRigidBody(s.body));
+  grabbables = grabbables.filter(g => !handles.has(g.body.handle));
+  ui.ropeCount.textContent = ropes.length;
+}
+
+// ---- Grabbing -----------------------------------------------------------------
+function tryGrab(hand) {
+  if (hand.joint) return;
+  const hp = worldPoint(hand.arm.body, hand.localEnd.x, hand.localEnd.y);
+  let best = null, bestD = GRAB_RANGE * GRAB_RANGE;
+  for (const g of grabbables) {
+    const t = g.body.translation();
+    const d = (t.x - hp.x) ** 2 + (t.y - hp.y) ** 2;
+    if (d < bestD) { bestD = d; best = g; }
+  }
+  if (!best) return;
+  const targetLocal = localOf(best.body, hp.x, hp.y);
+  const jd = RAPIER.JointData.revolute({ x: hand.localEnd.x, y: hand.localEnd.y }, targetLocal);
+  hand.joint = world.createImpulseJoint(jd, hand.arm.body, best.body, true);
+}
+function releaseGrab(hand) {
+  if (hand.joint) { world.removeImpulseJoint(hand.joint, true); hand.joint = null; }
+}
+function releaseAllGrabs() { if (doll) doll.hands.forEach(releaseGrab); }
+function isGrabbing() { return doll && doll.hands.some(h => h.joint); }
+
+// ---- Locomotion / control -----------------------------------------------------
+function footGrounded() {
+  for (const f of doll.feet) {
+    const p = worldPoint(f.leg.body, f.localEnd.x, f.localEnd.y);
+    const onLeft  = p.x >= LEVEL.leftPlat.x0 && p.x <= LEVEL.leftPlat.x1;
+    const onRight = p.x >= LEVEL.rightPlat.x0 && p.x <= LEVEL.rightPlat.x1;
+    if ((onLeft || onRight) && p.y <= 0.2) return true;
+  }
+  return false;
+}
+
+function controlDoll(dt) {
+  const t = doll.torso.body;
+  const left  = keys.has('a') || keys.has('arrowleft');
+  const right = keys.has('d') || keys.has('arrowright');
+  const dir = (right ? 1 : 0) - (left ? 1 : 0);
+  const grabbing = isGrabbing();
+  const grounded = footGrounded();
+
+  // Uprighting PD on the torso (relaxed while hanging so you can swing)
+  let ang = t.rotation();
+  while (ang >  Math.PI) ang -= 2 * Math.PI;
+  while (ang < -Math.PI) ang += 2 * Math.PI;
+  const upFactor = grabbing ? 0.12 : (grounded ? 1.0 : 0.5);
+  t.addTorque((-38 * ang - 9 * t.angvel()) * upFactor, true);
+
+  // Horizontal drive (walk on ground, pump while swinging)
+  if (dir !== 0) {
+    const vx = t.linvel().x;
+    const maxV = grabbing ? 99 : 5.5;
+    if (dir * vx < maxV) t.addForce({ x: dir * (grounded ? 95 : 42), y: 0 }, true);
+    // little stepping motion for readability
+    doll.walkPhase += dt * 10 * dir;
+  }
+
+  // Jump
+  if ((pressed.has('w') || pressed.has('arrowup') || pressed.has(' ')) && grounded && !grabbing) {
+    t.applyImpulse({ x: dir * 1.2, y: 11 }, true);
+    doll.feet.forEach(f => f.leg.body.applyImpulse({ x: 0, y: 1.5 }, true));
+  }
+
+  // Grab (hold J or left mouse) — both hands reach
+  const wantGrab = keys.has('j') || pointer.down && mode === 'play';
+  doll.hands.forEach(h => { if (wantGrab) tryGrab(h); else releaseGrab(h); });
+}
+
+function resetDoll() {
+  releaseAllGrabs();
+  for (const p of parts) {
+    p.body.setTranslation({ x: p.home.x, y: p.home.y }, true);
+    p.body.setRotation(0, true);
+    p.body.setLinvel({ x: 0, y: 0 }, true);
+    p.body.setAngvel(0, true);
+  }
+  won = false;
+  ui.status.textContent = 'Cross the canyon →';
+}
+
+// ---- Rendering ----------------------------------------------------------------
+function resize() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = Math.floor(innerWidth * dpr);
+  canvas.height = Math.floor(innerHeight * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener('resize', resize);
+
+function w2s(x, y) {
+  return {
+    x: (x - cam.x) * cam.scale + innerWidth / 2,
+    y: innerHeight * 0.66 - (y - cam.y) * cam.scale,
+  };
+}
+function s2w(px, py) {
+  return {
+    x: (px - innerWidth / 2) / cam.scale + cam.x,
+    y: -(py - innerHeight * 0.66) / cam.scale + cam.y,
+  };
+}
+
+function drawCapsule(p1, p2, radiusPx, fill, stroke) {
+  ctx.lineCap = 'round';
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = radiusPx * 2 + 3; ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke(); }
+  ctx.strokeStyle = fill; ctx.lineWidth = radiusPx * 2; ctx.beginPath();
+  ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+}
+
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, 0, innerHeight);
+  g.addColorStop(0, '#14213f'); g.addColorStop(0.55, '#20325f'); g.addColorStop(1, '#3a5a86');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, innerWidth, innerHeight);
+  // parallax hills
+  for (let layer = 0; layer < 2; layer++) {
+    const depth = 0.25 + layer * 0.25;
+    ctx.fillStyle = layer === 0 ? '#22345f' : '#2c4370';
+    ctx.beginPath();
+    const baseY = innerHeight * (0.62 + layer * 0.06);
+    ctx.moveTo(0, innerHeight);
+    for (let px = 0; px <= innerWidth; px += 40) {
+      const wx = (px - innerWidth / 2) / cam.scale + cam.x * depth;
+      const y = baseY - Math.sin(wx * 0.25 + layer) * 26 - Math.cos(wx * 0.11) * 18;
+      ctx.lineTo(px, y);
+    }
+    ctx.lineTo(innerWidth, innerHeight); ctx.closePath(); ctx.fill();
+  }
+}
+
+function drawGround(plat) {
+  const a = w2s(plat.x0, plat.top), b = w2s(plat.x1, LEVEL.deathY - 4);
+  ctx.fillStyle = '#3b2f24'; ctx.fillRect(a.x, a.y, b.x - a.x, b.y - a.y);
+  ctx.fillStyle = '#4f7a3a'; ctx.fillRect(a.x, a.y, b.x - a.x, 10);        // grass
+  ctx.fillStyle = '#6fa84f'; ctx.fillRect(a.x, a.y, b.x - a.x, 4);
+}
+
+function drawOverhang() {
+  const o = LEVEL.overhang;
+  const a = w2s(o.x0 - 0.4, o.y + 0.5), b = w2s(o.x1 + 0.4, o.y);
+  ctx.fillStyle = '#5a4636'; ctx.fillRect(a.x, a.y, b.x - a.x, b.y - a.y);
+  ctx.fillStyle = '#6d5642'; ctx.fillRect(a.x, a.y, b.x - a.x, 4);
+  if (mode === 'build') { // highlight placeable strip
+    const s1 = w2s(o.x0, o.y), s2 = w2s(o.x1, o.y);
+    ctx.strokeStyle = '#ffcf8f'; ctx.setLineDash([6, 6]); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(s1.x, s1.y + 2); ctx.lineTo(s2.x, s2.y + 2); ctx.stroke();
+    ctx.setLineDash([]);
+    // ghost rope under cursor
+    const gx = clamp(pointer.worldX, o.x0, o.x1);
+    const top = w2s(gx, o.y), bot = w2s(gx, o.y - 4.5);
+    ctx.strokeStyle = '#ffcf8f88'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(bot.x, bot.y); ctx.stroke();
+  }
+}
+
+function drawRopes() {
+  for (const rope of ropes) {
+    const pts = [w2s(rope.anchor.translation().x, rope.anchor.translation().y)];
+    for (const s of rope.segs) { const t = s.body.translation(); pts.push(w2s(t.x, t.y)); }
+    ctx.strokeStyle = '#caa06a'; ctx.lineWidth = Math.max(2, 0.16 * cam.scale); ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.stroke();
+    const anchor = pts[0]; ctx.fillStyle = '#8f7350';
+    ctx.beginPath(); ctx.arc(anchor.x, anchor.y, 5, 0, 7); ctx.fill();
+  }
+}
+
+function drawDoll() {
+  // soft shadow
+  const tp = doll.torso.body.translation();
+  const sh = w2s(tp.x, 0.02);
+  ctx.fillStyle = '#0006';
+  ctx.beginPath(); ctx.ellipse(sh.x, sh.y, 26, 7, 0, 0, 7); ctx.fill();
+
+  for (const p of parts) {
+    if (p.kind === 'head') continue;
+    const c = p.body.translation(), a = p.body.rotation();
+    const e1 = rot(0, p.half, a), e2 = rot(0, -p.half, a);
+    const p1 = w2s(c.x + e1.x, c.y + e1.y), p2 = w2s(c.x + e2.x, c.y + e2.y);
+    drawCapsule(p1, p2, p.radius * cam.scale, p.color, '#0e1530');
+  }
+  // head with a little face
+  const h = doll.head.body, hc = h.translation(), ha = h.rotation();
+  const hs = w2s(hc.x, hc.y), rad = doll.head.radius * cam.scale;
+  ctx.fillStyle = '#0e1530'; ctx.beginPath(); ctx.arc(hs.x, hs.y, rad + 2, 0, 7); ctx.fill();
+  ctx.fillStyle = doll.head.color; ctx.beginPath(); ctx.arc(hs.x, hs.y, rad, 0, 7); ctx.fill();
+  const eye = rot(0.12, 0.05, ha);
+  ctx.fillStyle = '#22314f';
+  ctx.beginPath(); ctx.arc(hs.x + eye.x * cam.scale, hs.y - eye.y * cam.scale, 3, 0, 7); ctx.fill();
+
+  // hand markers glow when gripping
+  for (const hand of doll.hands) {
+    const wp = worldPoint(hand.arm.body, hand.localEnd.x, hand.localEnd.y);
+    const s = w2s(wp.x, wp.y);
+    ctx.fillStyle = hand.joint ? '#8fffcf' : '#ffd9b0';
+    ctx.beginPath(); ctx.arc(s.x, s.y, hand.joint ? 6 : 4, 0, 7); ctx.fill();
+  }
+}
+
+function drawGoal() {
+  const base = w2s(LEVEL.goalX, 0), top = w2s(LEVEL.goalX, 2.4);
+  ctx.strokeStyle = '#dfe6ff'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(top.x, top.y); ctx.stroke();
+  ctx.fillStyle = won ? '#9fffce' : '#ff6b8a';
+  ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(top.x + 34, top.y + 10);
+  ctx.lineTo(top.x, top.y + 20); ctx.closePath(); ctx.fill();
+}
+
+function render() {
+  drawBackground();
+  drawGround(LEVEL.leftPlat); drawGround(LEVEL.rightPlat);
+  drawOverhang();
+  drawGoal();
+  drawRopes();
+  if (doll) drawDoll();
+}
+
+// ---- Main loop ----------------------------------------------------------------
+let acc = 0, last = 0;
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (!RAPIER_READY || !started) return;
+  const dt = Math.min(0.05, (now - last) / 1000 || 0); last = now;
+  acc += dt;
+  const step = 1 / 60;
+  let guard = 0;
+  while (acc >= step && guard++ < 5) {
+    controlDoll(step);
+    world.step();
+    acc -= step;
+    pressed.clear();
+  }
+
+  // camera follows torso, clamped to the level
+  const tp = doll.torso.body.translation();
+  cam.x += (clamp(tp.x, LEVEL.leftPlat.x0 + 4, LEVEL.rightPlat.x1 - 4) - cam.x) * 0.08;
+  cam.y += (clamp(tp.y, 1.2, 4) - cam.y) * 0.06;
+
+  // fall / win checks
+  if (!won && tp.y < LEVEL.deathY) { ui.status.textContent = 'Fell! Resetting…'; resetDoll(); }
+  if (!won && tp.x > LEVEL.goalX && tp.y > -1) win();
+
+  render();
+}
+
+function win() {
+  won = true;
+  ui.status.textContent = 'You made it! 🎉';
+  ui.overlay.className = 'win';
+  ui.overlay.innerHTML =
+    '<h1>You crossed the canyon! 🎉</h1>' +
+    '<p>That’s the core loop: rig an aid, then physically pull it off with a floppy body.</p>' +
+    '<button class="go" id="againBtn">Play again</button>';
+  document.getElementById('againBtn').onclick = () => {
+    ui.overlay.classList.add('hidden'); resetDoll();
+  };
+}
+
+// ---- Input --------------------------------------------------------------------
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+  if (!keys.has(k)) pressed.add(k);
+  keys.add(k);
+  if (k === 'b') { mode = mode === 'build' ? 'play' : 'build'; updateModePill(); }
+  if (k === 'r') resetDoll();
+  if (k === 'backspace') { e.preventDefault(); undoRope(); }
+});
+addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+
+function updateModePill() {
+  ui.mode.textContent = mode === 'build' ? '🔧 BUILD' : '🎮 PLAY';
+  ui.mode.className = mode;
+  canvas.style.cursor = mode === 'build' ? 'copy' : 'crosshair';
+}
+
+canvas.addEventListener('pointermove', e => {
+  pointer.x = e.clientX; pointer.y = e.clientY;
+  const w = s2w(e.clientX, e.clientY); pointer.worldX = w.x; pointer.worldY = w.y;
+});
+canvas.addEventListener('pointerdown', e => {
+  pointer.down = true;
+  const w = s2w(e.clientX, e.clientY);
+  pointer.worldX = w.x; pointer.worldY = w.y;
+  if (mode === 'build' && ropes.length < 6) placeRope(w.x);
+});
+addEventListener('pointerup', () => pointer.down = false);
+
+// ---- Boot ---------------------------------------------------------------------
+async function boot() {
+  resize();
+  try {
+    await RAPIER.init();
+  } catch (err) {
+    showLoadError(err); return;
+  }
+  world = new RAPIER.World({ x: 0, y: -16 });
+  world.timestep = 1 / 60;
+  buildLevel();
+  buildDoll();
+  updateModePill();
+  RAPIER_READY = true;
+  ui.startBtn.textContent = 'Start';
+  ui.startBtn.disabled = false;
+  ui.startBtn.onclick = () => { ui.overlay.classList.add('hidden'); started = true; last = performance.now(); };
+  requestAnimationFrame(frame);
+}
+
+function showLoadError(err) {
+  ui.startBtn.style.display = 'none';
+  ui.errBox.style.display = 'block';
+  ui.errBox.textContent =
+    'Could not load the physics engine (' + err + ').\n\n' +
+    'This game imports Rapier2D as an ES module, which browsers block over file://. ' +
+    'Run it from a local server instead:\n\n' +
+    '   python3 -m http.server 8000\n' +
+    'then open  http://localhost:8000';
+}
+
+boot();
+</script>
+</body>
+</html>
