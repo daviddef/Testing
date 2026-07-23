@@ -176,6 +176,8 @@ function pin(a, aLx, aLy, b, bLx, bLy, stiffness, damping) {
 function buildDoll() {
   const s = LEVEL.start;
   const torso = limb(s.x, s.y + 1.55, 0.42, 0.30, 1.2, '#6ea0ff', 'torso');
+  torso.body.setAngularDamping(6.0);   // implicit, stable — bleeds spin so the PD can stay gentle
+  torso.body.setLinearDamping(0.4);
   const head  = limb(s.x, s.y + 2.45, 0.14, 0.30, 0.8, '#ffd9b0', 'head');
   pin(torso, 0, 0.72, head, 0, -0.32, 26, 6);
 
@@ -298,19 +300,24 @@ function controlDoll(dt) {
   let ang = t.rotation();
   while (ang >  Math.PI) ang -= 2 * Math.PI;
   while (ang < -Math.PI) ang += 2 * Math.PI;
-  const up = grabbing ? 0.08 : 1.0;
-  t.addTorque((-95 * ang - 22 * t.angvel()) * up, true);
+  const up = grabbing ? 0.06 : 1.0;
+  // Gentle, CLAMPED PD. Heavy body angularDamping does most of the settling, so
+  // these gains stay well inside the explicit-integrator stability limit.
+  let corr = (-22 * ang - 4 * t.angvel()) * up;
+  corr = clamp(corr, -30, 30);
+  t.addTorque(corr, true);
 
   // --- Horizontal motion as a *velocity servo*, not raw force. The drive fades
   //     to zero as speed approaches the target, so it can never spin the doll up.
+  //     Output is clamped so a big speed error can't fling the body.
   if (!grabbing) {
     if (dir !== 0) {
-      t.addForce({ x: (dir * WALK - vx) * 16, y: 0 }, true);
+      t.addForce({ x: clamp((dir * WALK - vx) * 12, -40, 40), y: 0 }, true);
     } else if (grounded) {
-      t.addForce({ x: -vx * 10, y: 0 }, true);   // planted stop, no sliding
+      t.addForce({ x: clamp(-vx * 8, -30, 30), y: 0 }, true);   // planted stop
     }
   } else if (dir !== 0) {
-    t.addForce({ x: dir * 26, y: 0 }, true);       // pump the swing
+    t.addForce({ x: dir * 22, y: 0 }, true);       // pump the swing
   }
 
   // --- Stepping gait: alternating hip motors give real propulsion + readability.
@@ -505,6 +512,13 @@ function frame(now) {
   const tp = doll.torso.body.translation();
   cam.x += (clamp(tp.x, LEVEL.leftPlat.x0 + 4, LEVEL.rightPlat.x1 - 4) - cam.x) * 0.08;
   cam.y += (clamp(tp.y, 1.2, 4) - cam.y) * 0.06;
+
+  // safety net: if physics ever destabilises, recover instead of flying off forever
+  const tv = doll.torso.body.linvel();
+  const speed2 = tv.x * tv.x + tv.y * tv.y;
+  if (!Number.isFinite(tp.x) || !Number.isFinite(tp.y) || speed2 > 3600) {
+    ui.status.textContent = 'Recovered — resetting…'; resetDoll();
+  }
 
   // fall / win checks
   if (!won && tp.y < LEVEL.deathY) { ui.status.textContent = 'Fell! Resetting…'; resetDoll(); }
