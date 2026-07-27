@@ -215,7 +215,36 @@ scooters coexist without doubling the code.
   → Intermediate (directional trick buttons + hold for grinds/manuals) → Advanced
   (flick/timing, reverts, manual linking).
 
-## 11. Build Roadmap
+## 11. The Road to the Games — Competition / Olympic ladder
+
+The long-term dream that gives free-play a destination: climb a ladder of
+real-style competitions to an Olympic-style **Rollverse Games**.
+
+**[REAL] Grounding:** skateboarding is a real Olympic sport (Tokyo 2020, Paris
+2024) with two events — **Street** (stairs/rails/ledges/gaps) and **Park**
+(flowing bowl/pool) — judged as **runs + best-tricks, scored 0–100** on
+difficulty, variety, execution, flow, consistency. So **Marble Blocks = the
+Street event** and **Beachside Bowl = the Park event**: the districts *are* the
+arenas.
+
+**The ladder (unlock = an invitation):**
+1. **Street Sessions** (free-play jams) — beat a target score → first Rep points.
+2. **Local Jam** (best-trick) — reach a Rep threshold → cash, sponsor sticker, deck.
+3. **Regional Open** (Street or Park) — podium at a jam → ranking points, gear tier.
+4. **Pro Tour Stop** (qualifiers → finals) — top ranking + trick-tree unlocks → pro status.
+5. **National Team spot** — win a tour stop → team kit + invite to the Games.
+6. **★ The Rollverse Games** (Olympic Park) — qualify through the tour → the gold.
+
+**[DESIGN] How a comp plays (reuses existing systems):** best-of runs (drop the
+worst) + best-trick jams; qualifiers → finals. **Judging 0–100** teaches what
+makes skating good — difficulty (skill-tree tiers), variety (combo engine already
+penalises repeats), execution & flow (clean landings, momentum), consistency
+(land the whole run). Losing a heat = "so close, try again," never a dead end;
+keep the free-play world open between events. **Generalises across rideables:** a
+scooter circuit (park/street scooter comps are real) and later electric
+race/downhill events hang off the same ladder.
+
+## 12. Build Roadmap
 
 - **✅ v1 — Feel (done):** single-file web prototype — free movement, jump, earn a
   board, tricks, ramps, and a live **Studio** to tune game feel. Also published as a
